@@ -15,7 +15,10 @@ use windows::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
     System::LibraryLoader::GetModuleHandleW,
     UI::{
-        Input::KeyboardAndMouse::{SCANCODE_LSHIFT, SCANCODE_RSHIFT},
+        Input::KeyboardAndMouse::{
+            SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+            KEYEVENTF_KEYUP, SCANCODE_LSHIFT, SCANCODE_RSHIFT, VIRTUAL_KEY,
+        },
         WindowsAndMessaging::{
             CallNextHookEx, SendMessageTimeoutW, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK,
             KBDLLHOOKSTRUCT, LLKHF_UP, SMTO_ABORTIFHUNG, WH_KEYBOARD_LL,
@@ -92,8 +95,34 @@ unsafe fn send_message_timeout(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
     );
 }
 
+/// Virtual key code `VK__none_`, unassigned, used as a dummy key.
+const DUMMY_VK: u16 = 0xE8;
+
+/// Tap an unassigned key so that Windows no longer sees a lone Alt press/release,
+/// which would otherwise activate the menu bar of the foreground window.
+unsafe fn send_dummy_key() {
+    let make = |flags: KEYBD_EVENT_FLAGS| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(DUMMY_VK),
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let inputs = [make(KEYBD_EVENT_FLAGS(0)), make(KEYEVENTF_KEYUP)];
+    SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+}
+
 unsafe extern "system" fn keyboard_proc(code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
     let kbd_data: &KBDLLHOOKSTRUCT = &*(l_param.0 as *const _);
+    if kbd_data.vkCode == DUMMY_VK as u32 {
+        // ignore the dummy key injected by ourselves
+        return CallNextHookEx(None, code, w_param, l_param);
+    }
     debug!("keyboard {kbd_data:?}");
     let mut is_modifier = false;
     let scan_code = kbd_data.scanCode;
@@ -160,9 +189,11 @@ unsafe extern "system" fn keyboard_proc(code: i32, w_param: WPARAM, l_param: LPA
         } else if id == SWITCH_WINDOWS_HOTKEY_ID {
             send_message_timeout(WINDOW, WM_USER_SWITCH_WINDOWS_DONE, WPARAM(0), LPARAM(0));
         }
+        send_dummy_key();
     }
 
     if let Some((id, reverse, is_cancel)) = send_action_message {
+        send_dummy_key();
         if id == SWITCH_APPS_HOTKEY_ID {
             if is_cancel {
                 send_message_timeout(WINDOW, WM_USER_SWITCH_APPS_CANCEL, WPARAM(0), LPARAM(0));
